@@ -69,3 +69,26 @@ def decode_bitfield(payload, piece_count):
             if payload[index // 8] & (1 << (7 - index % 8))}
 
 
+async def read_frame(reader, config):
+    """readexactly handles both fragmented and coalesced TCP packets."""
+    length = UINT32.unpack(await reader.readexactly(4))[0]
+    maximum = max(5 + min(config.piece_size, config.file_size),
+                  1 + config.bitfield_size, 5)
+    if not 1 <= length <= maximum:
+        raise ProtocolError("Invalid message length: %s" % length)
+    raw_kind = (await reader.readexactly(1))[0]
+    try:
+        kind = Kind(raw_kind)
+    except ValueError as exc:
+        raise ProtocolError("Unknown message type: %s" % raw_kind) from exc
+    size = length - 1
+    if kind.value <= 3 and size != 0:
+        raise ProtocolError("Control messages cannot have a payload")
+    if kind in (Kind.HAVE, Kind.REQUEST) and size != 4:
+        raise ProtocolError("HAVE and REQUEST require a four-byte index")
+    if kind == Kind.BITFIELD and size != config.bitfield_size:
+        raise ProtocolError("Wrong bitfield length")
+    if kind == Kind.PIECE and not 5 <= size <= 4 + min(config.piece_size, config.file_size):
+        raise ProtocolError("Invalid PIECE payload length")
+    return kind, await reader.readexactly(size)
+
