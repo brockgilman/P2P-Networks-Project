@@ -85,6 +85,96 @@ class Peer:
             self.log.write("encountered a fatal error: %s." % error)
         self.done.set()
 
+    def accept(self, reader, writer):
+        if self.stopping:
+            writer.close()
+            return
+        self.spawn(self.session(reader, writer, expected=None))
+
+    async def connect(self, remote):
+        delay = 0.25
+        while not self.stopping and not self.done.is_set():
+            # A finished neighbor may already have exited. Its last bitfield is
+            # retained, and a completed local peer has nothing left to request.
+            if self.store.complete and len(self.known_pieces[remote.peer_id]) == self.config.piece_count:
+                return
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(remote.host, remote.port), 5)
+            except (OSError, asyncio.TimeoutError):
+                await asyncio.sleep(delay)
+                delay = min(5, delay * 2)
+                continue
+            delay = 0.25
+            await self.session(reader, writer, expected=remote.peer_id)
+            if not self.done.is_set():
+                await asyncio.sleep(delay)
+
+    async def session(self, reader, writer, expected):
+        connection = None
+        self.writers.add(writer)
+        try:
+            sock = writer.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            writer.write(handshake(self.info.peer_id))
+            await asyncio.wait_for(writer.drain(), 10)
+            remote_id = await asyncio.wait_for(read_handshake(reader), 10)
+            if remote_id not in self.by_id or remote_id == self.info.peer_id:
+                raise ProtocolError("Handshake contains an unknown or self peer ID")
+            if expected is not None and remote_id != expected:
+                raise ProtocolError("Handshake does not match the expected peer ID")
+            if expected is None and self.order[remote_id] < self.order[self.info.peer_id]:
+                raise ProtocolError("Earlier peers must accept, rather than initiate, this connection")
+            if remote_id in self.connections:
+                raise ProtocolError("Duplicate connection")
+            connection = Connection(remote_id, reader, writer)
+            self.connections[remote_id] = connection
+            if expected is None:
+                self.log.write("is connected from Peer %s." % remote_id)
+            else:
+                self.log.write("makes a connection to Peer %s." % remote_id)
+            connection.send(Kind.BITFIELD, encode_bitfield(self.store.pieces, self.config.piece_count))
+            await asyncio.wait_for(writer.drain(), 10)
+            while not self.stopping and not self.done.is_set():
+                kind, payload = await read_frame(reader, self.config)
+                # Disk failures are local failures, not a reason to retry a peer.
+                try:
+                    self.receive(connection, kind, payload)
+                except OSError as error:
+                    self.fail(error)
+                    return
+                await asyncio.wait_for(writer.drain(), 10)
+        except (OSError, EOFError, asyncio.IncompleteReadError,
+                asyncio.TimeoutError, ProtocolError) as error:
+            if not self.stopping and not self.done.is_set():
+                name = connection.peer_id if connection else expected
+                self.log.write("closed connection with %s: %s." %
+                               (name if name is not None else "unidentified peer", error))
+        finally:
+            if connection is not None and self.connections.get(connection.peer_id) is connection:
+                self.connections.pop(connection.peer_id)
+                self.release_request(connection)
+                if connection.peer_id in self.preferred:
+                    self.preferred.discard(connection.peer_id)
+                    self.log_preferred()
+                if self.optimistic == connection.peer_id:
+                    self.optimistic = None
+                if not self.stopping and not self.done.is_set():
+                    self.request_available()
+            # Flush final HAVE messages before sending TCP FIN. Other peers use
+            # these messages to detect swarm completion; there is no extra opcode.
+            try:
+                await asyncio.wait_for(writer.drain(), 3)
+            except (OSError, asyncio.TimeoutError):
+                pass
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), 3)
+            except (OSError, asyncio.TimeoutError):
+                pass
+            self.writers.discard(writer)
+
     def receive(self, connection, kind, payload):
         remote_id = connection.peer_id
         if kind == Kind.BITFIELD:
