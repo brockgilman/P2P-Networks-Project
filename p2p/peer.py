@@ -85,6 +85,27 @@ class Peer:
             self.log.write("encountered a fatal error: %s." % error)
         self.done.set()
 
+    async def run(self):
+        try:
+            # The configured host is a destination for others; listen on local
+            # interfaces so both localhost and separate-machine setups work.
+            self.server = await asyncio.start_server(self.accept, host="0.0.0.0", port=self.info.port)
+            self.log.write("is listening on port %s." % self.info.port)
+            print("Peer %s listening on port %s" % (self.info.peer_id, self.info.port), flush=True)
+            for earlier in self.peers[:self.order[self.info.peer_id]]:
+                self.spawn(self.connect(earlier))
+            self.spawn(self.periodic(self.config.unchoking_interval, self.choose_preferred))
+            self.spawn(self.periodic(self.config.optimistic_interval, self.choose_optimistic))
+            self.spawn(self.periodic(1, self.expire_requests))
+            self.check_complete()
+            await self.done.wait()
+            if self.failure is not None:
+                raise RuntimeError(str(self.failure)) from self.failure
+            self.log.write("has observed that all peers have the complete file; shutting down.")
+            print("Peer %s: all peers have the complete file" % self.info.peer_id, flush=True)
+        finally:
+            await self.close()
+
     def accept(self, reader, writer):
         if self.stopping:
             writer.close()
