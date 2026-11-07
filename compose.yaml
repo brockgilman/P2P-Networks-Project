@@ -1,0 +1,41 @@
+x-peer: &peer
+  build: .
+  init: true
+  restart: "no"
+
+services:
+  peer1001:
+    <<: *peer
+    command: ["1001"]
+    volumes:
+      - ${P2P_CONTAINER_ROOT:-./runs/containers}/1001:/work
+  peer1002:
+    <<: *peer
+    command: ["1002"]
+    depends_on: [peer1001]
+    volumes:
+      - ${P2P_CONTAINER_ROOT:-./runs/containers}/1002:/work
+  peer1003:
+    <<: *peer
+    command: ["1003"]
+    depends_on: [peer1002]
+    volumes:
+      - ${P2P_CONTAINER_ROOT:-./runs/containers}/1003:/work
+  peer1004:
+    <<: *peer
+    command: ["1004"]
+    depends_on: [peer1003]
+    volumes:
+      - ${P2P_CONTAINER_ROOT:-./runs/containers}/1004:/work
+  peer1005:
+    <<: *peer
+    command: ["1005"]
+    depends_on: [peer1004]
+    volumes:
+      - ${P2P_CONTAINER_ROOT:-./runs/containers}/1005:/work
+  peer1006:
+    <<: *peer
+    command: ["1006"]
+    depends_on: [peer1005]
+    volumes:
+      - ${P2P_CONTAINER_ROOT:-./runs/containers}/1006:/work
